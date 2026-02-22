@@ -3,6 +3,8 @@ from math import log
 from synergy_forecast_simulator import (
     AgentCounterfactualProfile,
     HistoricalCoalitionRecord,
+    StabilityOptimizationLayer,
+    SynergyLearningLoop,
     SynergyForecastSimulator,
 )
 
@@ -97,3 +99,100 @@ def test_entropy_constraint_prevents_trust_monopoly():
 
     assert forecast.trust_weight_max_share < 1.0
     assert entropy_ratio >= 0.70
+
+
+def test_synergy_learning_loop_adjusts_formation_probabilities():
+    learning_loop = SynergyLearningLoop(learning_rate=0.9)
+    coalitions = [("alpha", "beta"), ("alpha", "gamma")]
+    base = [0.5, 0.5]
+
+    learning_loop.update_from_outcome(
+        ("alpha", "beta"),
+        predicted_synergy=2.0,
+        realized_synergy=4.0,
+    )
+    learning_loop.update_from_outcome(
+        ("alpha", "gamma"),
+        predicted_synergy=2.0,
+        realized_synergy=1.0,
+    )
+
+    adjusted = learning_loop.adjust_formation_probabilities(coalitions, base)
+
+    assert abs(sum(adjusted) - 1.0) < 1e-12
+    assert adjusted[0] > base[0]
+    assert adjusted[1] < base[1]
+
+
+def test_simulator_learning_updates_future_structural_weighting():
+    learning_loop = SynergyLearningLoop(learning_rate=0.8)
+    candidate = ["alpha", "beta", "gamma"]
+    profiles = _build_profiles()
+
+    baseline_sim = SynergyForecastSimulator(
+        _build_history(),
+        simulation_draws=3000,
+        random_seed=29,
+        synergy_learning_loop=learning_loop,
+    )
+    baseline = baseline_sim.forecast(candidate, profiles)
+
+    baseline_sim.register_realized_outcome(
+        candidate,
+        predicted_combined_impact=baseline.projected_distribution.expected_combined_impact,
+        realized_combined_impact=baseline.projected_distribution.expected_combined_impact + 3.0,
+        predicted_additive_impact=baseline.projected_distribution.expected_additive_impact,
+    )
+
+    replay_sim = SynergyForecastSimulator(
+        _build_history(),
+        simulation_draws=3000,
+        random_seed=29,
+        synergy_learning_loop=learning_loop,
+    )
+    learned = replay_sim.forecast(candidate, profiles)
+
+    assert learned.structural_formation_weight > 1.0
+    assert learned.projected_distribution.mean_amplification > baseline.projected_distribution.mean_amplification
+
+
+def test_stability_layer_penalizes_unstable_team_configurations():
+    stability_layer = StabilityOptimizationLayer(
+        baseline_convergence_time=3.0,
+        baseline_collaboration_variance=0.08,
+        baseline_conflict_frequency=1.2,
+        max_penalty_share=0.70,
+    )
+
+    stable_sim = SynergyForecastSimulator(
+        _build_history(),
+        simulation_draws=3500,
+        random_seed=31,
+        stability_optimization_layer=stability_layer,
+    )
+    unstable_sim = SynergyForecastSimulator(
+        _build_history(),
+        simulation_draws=3500,
+        random_seed=31,
+        stability_optimization_layer=stability_layer,
+    )
+
+    stable_profiles = [
+        AgentCounterfactualProfile("alpha", 13.0, 0.6, trust_coefficient=0.96, predictive_calibration_stability=0.95),
+        AgentCounterfactualProfile("beta", 12.0, 0.5, trust_coefficient=0.94, predictive_calibration_stability=0.94),
+        AgentCounterfactualProfile("gamma", 11.0, 0.6, trust_coefficient=0.95, predictive_calibration_stability=0.93),
+    ]
+    unstable_profiles = [
+        AgentCounterfactualProfile("alpha", 16.0, 3.4, trust_coefficient=0.20, predictive_calibration_stability=0.18),
+        AgentCounterfactualProfile("beta", 15.0, 3.2, trust_coefficient=0.18, predictive_calibration_stability=0.20),
+        AgentCounterfactualProfile("gamma", 14.0, 3.1, trust_coefficient=0.22, predictive_calibration_stability=0.19),
+    ]
+
+    stable = stable_sim.forecast(["alpha", "beta", "gamma"], stable_profiles)
+    unstable = unstable_sim.forecast(["alpha", "beta", "gamma"], unstable_profiles)
+
+    assert stable.stability_penalty_factor > unstable.stability_penalty_factor
+    assert stable.instability_risk < unstable.instability_risk
+    assert unstable.stability_score < stable.stability_score
+    assert unstable.projected_distribution.expected_additive_impact > stable.projected_distribution.expected_additive_impact
+    assert unstable.projected_distribution.mean_amplification < stable.projected_distribution.mean_amplification

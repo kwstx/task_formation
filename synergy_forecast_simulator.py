@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
-from math import erf, log, sqrt
+from math import erf, exp, log, sqrt
 from random import Random
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
@@ -53,6 +53,217 @@ class SynergyForecast:
     team_prediction_reliability: float = 0.0
     trust_weight_entropy: float = 0.0
     trust_weight_max_share: float = 1.0
+    structural_formation_weight: float = 1.0
+    stability_penalty_factor: float = 1.0
+    stability_score: float = 1.0
+    instability_risk: float = 0.0
+
+
+@dataclass(frozen=True)
+class StabilityAssessment:
+    """Stability diagnostics for a candidate coalition."""
+
+    negotiation_convergence_time: float
+    collaboration_variance: float
+    conflict_resolution_frequency: float
+    instability_risk: float
+    stability_score: float
+    penalty_factor: float
+
+
+class StabilityOptimizationLayer:
+    """
+    Penalizes coalitions that exhibit unstable collaboration dynamics.
+
+    The layer estimates instability from three drivers:
+    - Negotiation convergence time (higher is less stable)
+    - Collaboration variance (higher is less stable)
+    - Conflict resolution frequency (higher is less stable)
+    """
+
+    def __init__(
+        self,
+        *,
+        convergence_weight: float = 0.40,
+        variance_weight: float = 0.35,
+        conflict_weight: float = 0.25,
+        max_penalty_share: float = 0.65,
+        baseline_convergence_time: float = 1.0,
+        baseline_collaboration_variance: float = 1.0,
+        baseline_conflict_frequency: float = 1.0,
+    ) -> None:
+        total_weight = max(1e-9, convergence_weight + variance_weight + conflict_weight)
+        self._convergence_weight = max(0.0, convergence_weight) / total_weight
+        self._variance_weight = max(0.0, variance_weight) / total_weight
+        self._conflict_weight = max(0.0, conflict_weight) / total_weight
+        self._max_penalty_share = max(0.0, min(0.95, max_penalty_share))
+        self._baseline_convergence_time = max(1e-6, baseline_convergence_time)
+        self._baseline_collaboration_variance = max(1e-6, baseline_collaboration_variance)
+        self._baseline_conflict_frequency = max(1e-6, baseline_conflict_frequency)
+
+    def evaluate(
+        self,
+        *,
+        negotiation_convergence_time: float,
+        collaboration_variance: float,
+        conflict_resolution_frequency: float,
+    ) -> StabilityAssessment:
+        convergence_ratio = max(0.0, negotiation_convergence_time) / self._baseline_convergence_time
+        variance_ratio = max(0.0, collaboration_variance) / self._baseline_collaboration_variance
+        conflict_ratio = max(0.0, conflict_resolution_frequency) / self._baseline_conflict_frequency
+
+        instability_risk = self._weighted_sigmoid_risk(
+            convergence_ratio=convergence_ratio,
+            variance_ratio=variance_ratio,
+            conflict_ratio=conflict_ratio,
+        )
+        stability_score = max(0.0, 1.0 - instability_risk)
+        penalty_factor = max(0.0, 1.0 - (self._max_penalty_share * instability_risk))
+
+        return StabilityAssessment(
+            negotiation_convergence_time=max(0.0, negotiation_convergence_time),
+            collaboration_variance=max(0.0, collaboration_variance),
+            conflict_resolution_frequency=max(0.0, conflict_resolution_frequency),
+            instability_risk=instability_risk,
+            stability_score=stability_score,
+            penalty_factor=penalty_factor,
+        )
+
+    def _weighted_sigmoid_risk(
+        self,
+        *,
+        convergence_ratio: float,
+        variance_ratio: float,
+        conflict_ratio: float,
+    ) -> float:
+        convergence_risk = self._soft_threshold(convergence_ratio)
+        variance_risk = self._soft_threshold(variance_ratio)
+        conflict_risk = self._soft_threshold(conflict_ratio)
+        risk = (
+            self._convergence_weight * convergence_risk
+            + self._variance_weight * variance_risk
+            + self._conflict_weight * conflict_risk
+        )
+        return self._clamp01(risk)
+
+    @staticmethod
+    def _soft_threshold(ratio: float) -> float:
+        # Ratios above 1 quickly increase risk, but remain bounded in [0, 1].
+        return 1.0 / (1.0 + exp(-(ratio - 1.0) * 1.8))
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+
+class SynergyLearningLoop:
+    """
+    Learns structural collaboration priors from realized-vs-projected outcomes.
+
+    Overperforming coalitions and agent pairs are up-weighted for future formation
+    sampling; underperforming structures are dampened.
+    """
+
+    def __init__(
+        self,
+        *,
+        learning_rate: float = 0.45,
+        pair_credit_share: float = 0.60,
+        min_weight: float = 0.35,
+        max_weight: float = 3.00,
+        max_relative_error: float = 0.75,
+    ) -> None:
+        self._learning_rate = max(0.0, learning_rate)
+        self._pair_credit_share = max(0.0, min(1.0, pair_credit_share))
+        self._min_weight = max(1e-6, min_weight)
+        self._max_weight = max(self._min_weight, max_weight)
+        self._max_relative_error = max(1e-6, max_relative_error)
+        self._coalition_weights: Dict[Tuple[str, ...], float] = {}
+        self._pair_weights: Dict[Tuple[str, str], float] = {}
+
+    def update_from_outcome(
+        self,
+        coalition: Sequence[str],
+        *,
+        predicted_synergy: float,
+        realized_synergy: float,
+    ) -> float:
+        """
+        Updates coalition and pair weights from one realized outcome.
+
+        Returns:
+            The new structural weight for this coalition after the update.
+        """
+        key = tuple(sorted(coalition))
+        if len(key) < 2:
+            return 1.0
+
+        baseline = max(abs(predicted_synergy), 1.0)
+        relative_error = (realized_synergy - predicted_synergy) / baseline
+        clipped_error = max(-self._max_relative_error, min(self._max_relative_error, relative_error))
+
+        coalition_factor = exp(self._learning_rate * clipped_error * (1.0 - self._pair_credit_share))
+        pair_factor = exp(self._learning_rate * clipped_error * self._pair_credit_share)
+
+        current_coalition_weight = self._coalition_weights.get(key, 1.0)
+        self._coalition_weights[key] = self._clamp_weight(current_coalition_weight * coalition_factor)
+
+        for pair in combinations(key, 2):
+            current_pair_weight = self._pair_weights.get(pair, 1.0)
+            self._pair_weights[pair] = self._clamp_weight(current_pair_weight * pair_factor)
+
+        return self.structural_weight(key)
+
+    def structural_weight(self, coalition: Sequence[str]) -> float:
+        """
+        Structural prior for a coalition, combining coalition and pair-level memory.
+        """
+        key = tuple(sorted(coalition))
+        if len(key) < 2:
+            return 1.0
+
+        coalition_weight = self._coalition_weights.get(key, 1.0)
+        pair_weights = [self._pair_weights.get(pair, 1.0) for pair in combinations(key, 2)]
+        if not pair_weights:
+            return coalition_weight
+
+        pair_mean = sum(pair_weights) / len(pair_weights)
+        return self._clamp_weight(coalition_weight * pair_mean)
+
+    def adjust_formation_probabilities(
+        self,
+        coalitions: Sequence[Sequence[str]],
+        base_probabilities: Sequence[float],
+    ) -> List[float]:
+        """
+        Reweights formation probabilities using learned structural priors.
+        """
+        if not coalitions:
+            return []
+        if len(coalitions) != len(base_probabilities):
+            raise ValueError("coalitions and base_probabilities must have the same length")
+
+        normalized = self._normalize_probabilities(base_probabilities)
+        weighted = [
+            normalized[i] * self.structural_weight(coalitions[i])
+            for i in range(len(coalitions))
+        ]
+        total = sum(weighted)
+        if total <= 1e-12:
+            return normalized
+        return [p / total for p in weighted]
+
+    def _normalize_probabilities(self, probabilities: Sequence[float]) -> List[float]:
+        if not probabilities:
+            return []
+        total = sum(max(0.0, p) for p in probabilities)
+        if total <= 1e-12:
+            uniform = 1.0 / len(probabilities)
+            return [uniform for _ in probabilities]
+        return [max(0.0, p) / total for p in probabilities]
+
+    def _clamp_weight(self, value: float) -> float:
+        return max(self._min_weight, min(self._max_weight, value))
 
 
 class SynergyForecastSimulator:
@@ -71,6 +282,8 @@ class SynergyForecastSimulator:
         simulation_draws: int = 5000,
         random_seed: int | None = None,
         min_entropy_ratio: float = 0.72,
+        synergy_learning_loop: SynergyLearningLoop | None = None,
+        stability_optimization_layer: StabilityOptimizationLayer | None = None,
     ) -> None:
         if simulation_draws <= 0:
             raise ValueError("simulation_draws must be > 0")
@@ -79,6 +292,8 @@ class SynergyForecastSimulator:
         self._simulation_draws = simulation_draws
         self._rng = Random(random_seed)
         self._min_entropy_ratio = max(0.0, min(1.0, min_entropy_ratio))
+        self._synergy_learning_loop = synergy_learning_loop
+        self._stability_optimization_layer = stability_optimization_layer
 
     def forecast(
         self,
@@ -101,6 +316,17 @@ class SynergyForecastSimulator:
         density_mean, density_std = self._historical_synergy_density_distribution(coalition)
         pair_count = len(list(combinations(coalition, 2)))
         trust_max_share = max(trust_weights.values()) if trust_weights else 1.0
+        structural_weight = (
+            self._synergy_learning_loop.structural_weight(coalition)
+            if self._synergy_learning_loop is not None
+            else 1.0
+        )
+        stability_assessment = self._evaluate_stability(
+            coalition,
+            profile_map,
+            additive_mean=additive_mean,
+            additive_sigma=additive_sigma,
+        )
 
         amplification_samples: List[float] = []
         combined_samples: List[float] = []
@@ -112,7 +338,14 @@ class SynergyForecastSimulator:
         for _ in range(self._simulation_draws):
             additive_draw = self._rng.gauss(additive_mean, additive_sigma)
             density_draw = self._rng.gauss(density_mean, density_sigma)
-            amplification_draw = additive_draw * density_draw * pair_count * propagation_multiplier
+            amplification_draw = (
+                additive_draw
+                * density_draw
+                * pair_count
+                * propagation_multiplier
+                * structural_weight
+                * stability_assessment.penalty_factor
+            )
             combined_draw = additive_draw + amplification_draw
 
             amplification_samples.append(amplification_draw)
@@ -131,7 +364,61 @@ class SynergyForecastSimulator:
             team_prediction_reliability=team_reliability,
             trust_weight_entropy=trust_entropy,
             trust_weight_max_share=trust_max_share,
+            structural_formation_weight=structural_weight,
+            stability_penalty_factor=stability_assessment.penalty_factor,
+            stability_score=stability_assessment.stability_score,
+            instability_risk=stability_assessment.instability_risk,
         )
+
+    def register_realized_outcome(
+        self,
+        coalition: Sequence[str],
+        *,
+        predicted_combined_impact: float,
+        realized_combined_impact: float,
+        predicted_additive_impact: float,
+    ) -> float:
+        """
+        Feeds realized outcomes back into the learning loop.
+
+        Returns:
+            Updated structural weight for this coalition.
+        """
+        if self._synergy_learning_loop is None:
+            return 1.0
+
+        predicted_synergy = predicted_combined_impact - predicted_additive_impact
+        realized_synergy = realized_combined_impact - predicted_additive_impact
+        return self._synergy_learning_loop.update_from_outcome(
+            coalition,
+            predicted_synergy=predicted_synergy,
+            realized_synergy=realized_synergy,
+        )
+
+    def adjust_structural_formation_probabilities(
+        self,
+        coalitions: Sequence[Sequence[str]],
+        base_probabilities: Sequence[float],
+    ) -> List[float]:
+        """
+        Applies learned structural priors to formation probabilities.
+        """
+        if self._synergy_learning_loop is None:
+            return self._normalize_probabilities(base_probabilities)
+        return self._synergy_learning_loop.adjust_formation_probabilities(
+            coalitions,
+            base_probabilities,
+        )
+
+    @staticmethod
+    def _normalize_probabilities(probabilities: Sequence[float]) -> List[float]:
+        if not probabilities:
+            return []
+        total = sum(max(0.0, p) for p in probabilities)
+        if total <= 1e-12:
+            uniform = 1.0 / len(probabilities)
+            return [uniform for _ in probabilities]
+        return [max(0.0, p) / total for p in probabilities]
 
     def _index_profiles(
         self,
@@ -231,6 +518,53 @@ class SynergyForecastSimulator:
             if value > 1e-12:
                 entropy -= value * log(value)
         return entropy
+
+    def _evaluate_stability(
+        self,
+        coalition: Sequence[str],
+        profile_map: Mapping[str, AgentCounterfactualProfile],
+        *,
+        additive_mean: float,
+        additive_sigma: float,
+    ) -> StabilityAssessment:
+        if self._stability_optimization_layer is None:
+            return StabilityAssessment(
+                negotiation_convergence_time=0.0,
+                collaboration_variance=0.0,
+                conflict_resolution_frequency=0.0,
+                instability_risk=0.0,
+                stability_score=1.0,
+                penalty_factor=1.0,
+            )
+
+        pair_count = max(1, len(list(combinations(coalition, 2))))
+        reliability = self._coalition_reliability_estimate(coalition, profile_map)
+        normalized_variance = additive_sigma / max(1.0, abs(additive_mean))
+        negotiation_convergence_time = pair_count * (1.2 + (1.8 * (1.0 - reliability)))
+        collaboration_variance = normalized_variance * (1.0 + (1.5 * (1.0 - reliability)))
+        conflict_resolution_frequency = pair_count * (0.4 + (0.9 * (1.0 - reliability)) + (0.8 * normalized_variance))
+
+        return self._stability_optimization_layer.evaluate(
+            negotiation_convergence_time=negotiation_convergence_time,
+            collaboration_variance=collaboration_variance,
+            conflict_resolution_frequency=conflict_resolution_frequency,
+        )
+
+    def _coalition_reliability_estimate(
+        self,
+        coalition: Sequence[str],
+        profile_map: Mapping[str, AgentCounterfactualProfile],
+    ) -> float:
+        if not coalition:
+            return 1.0
+
+        scores = []
+        for agent in coalition:
+            profile = profile_map[agent]
+            trust = self._clamp01(profile.trust_coefficient)
+            stability = self._clamp01(profile.predictive_calibration_stability)
+            scores.append(0.5 * trust + 0.5 * stability)
+        return self._clamp01(sum(scores) / len(scores))
 
     def _historical_synergy_density_distribution(
         self,

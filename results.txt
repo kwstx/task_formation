@@ -1,0 +1,29 @@
+python : ...
+At line:1 char:1
++ python c:\Users\galan\task
+_formation\test_complementar
+ity_analyzer.py ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (...:S  
+  tring) [], RemoteExcept   
+ ion
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+----------------------------
+----------------------------
+--------------
+Ran 3 tests in 0.000s
+
+OK
+Base score: 0.337845, With positive history: 0.561845
+Non-obvious synergy candidates count: 3
+Candidate: {'agents': ('frontend_genie', 'backend_beast'), 'synergy_potential_score': 0.157845, 'structural_complementarity': 0.337845, 'max_individual_alignment': 0.45}
+Candidate: {'agents': ('backend_beast', 'foundation_guy'), 'synergy_potential_score': 0.133701, 'structural_complementarity': 0.313701, 'max_individual_alignment': 0.45}
+Candidate: {'agents': ('frontend_genie', 'foundation_guy'), 'synergy_potential_score': 0.068, 'structural_complementarity': 0.228, 'max_individual_alignment': 0.4}
+Successfully detected non-obvious synergy!
+Frontend + Backend Complementarity: 0.337845
+Frontend + Frontend Complementarity: 0.139765
