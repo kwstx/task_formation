@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
-from math import erf, sqrt
+from math import erf, log, sqrt
 from random import Random
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
@@ -24,6 +24,8 @@ class AgentCounterfactualProfile:
     agent_id: str
     expected_impact: float
     uncertainty: float
+    trust_coefficient: float = 1.0
+    predictive_calibration_stability: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,9 @@ class SynergyForecast:
     coalition: Tuple[str, ...]
     historical_synergy_density: float
     projected_distribution: ProbabilisticSynergyDistribution
+    team_prediction_reliability: float = 0.0
+    trust_weight_entropy: float = 0.0
+    trust_weight_max_share: float = 1.0
 
 
 class SynergyForecastSimulator:
@@ -65,6 +70,7 @@ class SynergyForecastSimulator:
         *,
         simulation_draws: int = 5000,
         random_seed: int | None = None,
+        min_entropy_ratio: float = 0.72,
     ) -> None:
         if simulation_draws <= 0:
             raise ValueError("simulation_draws must be > 0")
@@ -72,6 +78,7 @@ class SynergyForecastSimulator:
         self._historical_records = list(historical_records)
         self._simulation_draws = simulation_draws
         self._rng = Random(random_seed)
+        self._min_entropy_ratio = max(0.0, min(1.0, min_entropy_ratio))
 
     def forecast(
         self,
@@ -83,21 +90,28 @@ class SynergyForecastSimulator:
 
         coalition = tuple(sorted(candidate_agents))
         profile_map = self._index_profiles(counterfactual_profiles)
-        additive_mean, additive_sigma = self._coalition_additive_parameters(
+        trust_weights, trust_entropy = self._trust_adjusted_weights(coalition, profile_map)
+        additive_mean, additive_sigma, team_reliability = self._coalition_additive_parameters(
             coalition,
             profile_map,
+            trust_weights,
         )
 
         density_mean, density_std = self._historical_synergy_density_distribution(coalition)
         pair_count = len(list(combinations(coalition, 2)))
+        trust_max_share = max(trust_weights.values()) if trust_weights else 1.0
 
         amplification_samples: List[float] = []
         combined_samples: List[float] = []
 
+        # Stable calibration increases confidence in propagation dynamics.
+        density_sigma = density_std * max(0.55, 1.0 - (0.35 * team_reliability))
+        propagation_multiplier = 0.85 + (0.30 * team_reliability)
+
         for _ in range(self._simulation_draws):
             additive_draw = self._rng.gauss(additive_mean, additive_sigma)
-            density_draw = self._rng.gauss(density_mean, density_std)
-            amplification_draw = additive_draw * density_draw * pair_count
+            density_draw = self._rng.gauss(density_mean, density_sigma)
+            amplification_draw = additive_draw * density_draw * pair_count * propagation_multiplier
             combined_draw = additive_draw + amplification_draw
 
             amplification_samples.append(amplification_draw)
@@ -113,6 +127,9 @@ class SynergyForecastSimulator:
             coalition=coalition,
             historical_synergy_density=density_mean,
             projected_distribution=distribution,
+            team_prediction_reliability=team_reliability,
+            trust_weight_entropy=trust_entropy,
+            trust_weight_max_share=trust_max_share,
         )
 
     def _index_profiles(
@@ -128,18 +145,82 @@ class SynergyForecastSimulator:
         self,
         coalition: Iterable[str],
         profile_map: Mapping[str, AgentCounterfactualProfile],
-    ) -> Tuple[float, float]:
+        trust_weights: Mapping[str, float],
+    ) -> Tuple[float, float, float]:
         additive_mean = 0.0
         additive_var = 0.0
+        weighted_reliability = 0.0
 
         for agent in coalition:
             if agent not in profile_map:
                 raise ValueError(f"missing counterfactual profile for agent '{agent}'")
             profile = profile_map[agent]
-            additive_mean += profile.expected_impact
-            additive_var += max(profile.uncertainty, 0.0) ** 2
+            trust = self._clamp01(profile.trust_coefficient)
+            stability = self._clamp01(profile.predictive_calibration_stability)
+            effective_trust = trust * (0.5 + 0.5 * stability)
+            influence_weight = trust_weights.get(agent, 0.0)
 
-        return additive_mean, sqrt(additive_var)
+            # Weight influence projections by predictive calibration stability.
+            influence_projection = profile.expected_impact * (0.85 + 0.30 * stability)
+            influence_projection *= 0.90 + (0.20 * influence_weight)
+            additive_mean += influence_projection
+
+            uncertainty_scale = max(0.35, 1.0 - (0.35 * effective_trust))
+            additive_var += (max(profile.uncertainty, 0.0) * uncertainty_scale) ** 2
+            weighted_reliability += influence_weight * effective_trust
+
+        return additive_mean, sqrt(additive_var), self._clamp01(weighted_reliability)
+
+    def _trust_adjusted_weights(
+        self,
+        coalition: Sequence[str],
+        profile_map: Mapping[str, AgentCounterfactualProfile],
+    ) -> Tuple[Dict[str, float], float]:
+        if not coalition:
+            return {}, 0.0
+
+        raw_weights: Dict[str, float] = {}
+        for agent in coalition:
+            profile = profile_map[agent]
+            trust = self._clamp01(profile.trust_coefficient)
+            stability = self._clamp01(profile.predictive_calibration_stability)
+            raw_weights[agent] = trust * (0.20 + (0.80 * stability))
+
+        total = sum(raw_weights.values())
+        if total <= 1e-12:
+            uniform = 1.0 / len(coalition)
+            weights = {agent: uniform for agent in coalition}
+            return weights, self._entropy(weights.values())
+
+        weights = {agent: value / total for agent, value in raw_weights.items()}
+
+        entropy = self._entropy(weights.values())
+        max_entropy = log(len(weights)) if len(weights) > 1 else 1.0
+        entropy_ratio = entropy / max_entropy if max_entropy > 1e-12 else 1.0
+        if entropy_ratio >= self._min_entropy_ratio or len(weights) <= 1:
+            return weights, entropy
+
+        # Entropy blend prevents very high-trust agents from monopolizing formation.
+        deficit = self._min_entropy_ratio - entropy_ratio
+        blend = min(1.0, deficit / max(self._min_entropy_ratio, 1e-9))
+        uniform = 1.0 / len(weights)
+        adjusted = {
+            agent: ((1.0 - blend) * weight) + (blend * uniform)
+            for agent, weight in weights.items()
+        }
+        return adjusted, self._entropy(adjusted.values())
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    @staticmethod
+    def _entropy(values: Iterable[float]) -> float:
+        entropy = 0.0
+        for value in values:
+            if value > 1e-12:
+                entropy -= value * log(value)
+        return entropy
 
     def _historical_synergy_density_distribution(
         self,
